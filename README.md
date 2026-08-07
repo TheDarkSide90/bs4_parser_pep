@@ -8,21 +8,27 @@ git clone https://github.com/TheDarkSide90/bs4_parser_pep.git
 cd bs4_parser_pep
 ```
 ```bash
+python -m venv venv
+```
+```bash
+source venv/Scripts/activate
+```
+```bash
 cd src
 ```
-# Помощь по парсеру
+## Помощь по парсеру
 ```bash
 python main.py -h
 ```
-# Очистить кеш парсера
+## Очистить кеш парсера
 ```bash
 python main.py -c
 ```
-# Дополнительные способы вывода данных:
+## Дополнительные способы вывода данных:
 ```bash
 python main.py -o
 ```
-# Обязательные позиционные аргументы:
+## Обязательные позиционные аргументы:
 ```bash
 whats-new
 ```
