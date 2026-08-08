@@ -1,3 +1,6 @@
 class ParserFindTagException(Exception):
     """Вызывается, когда парсер не может найти тег."""
-    pass
+
+
+class UlTagNotFound(Exception):
+    """ul тег не найден парсером"""

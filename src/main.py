@@ -1,20 +1,21 @@
 import re
 import logging
-import csv
 from urllib.parse import urljoin
 from collections import Counter
-from pathlib import Path
 
 import requests_cache
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 from constants import (
-    BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL, PEP_DOC_URL, PEP_ID
+    BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL, PEP_DOC_URL
 )
 from configs import configure_argument_parser, configure_logging
+from exceptions import UlTagNotFound
 from outputs import control_output
 from utils import get_response, find_tag
+
+logger = logging.getLogger(__name__)
 
 
 def whats_new(session):
@@ -31,7 +32,7 @@ def whats_new(session):
 
     results = [('Ссылка на статью', 'Заголовок', 'Редактор, автор')]
     for section in tqdm(sections_by_python):
-        version_a_tag = section.find('a')
+        version_a_tag = find_tag(section, 'a')
         version_link = urljoin(whats_new_url, version_a_tag['href'])
         response = get_response(session, version_link)
         if response is None:
@@ -59,7 +60,7 @@ def latest_versions(session):
             a_tags = ul.find_all('a')
             break
     else:
-        raise Exception('Ничего не нашлось')
+        raise UlTagNotFound('Ничего не нашлось')
     results = [('Ссылка на документацию', 'Версия', 'Статус')]
     pattern = r'Python (?P<version>\d\.\d+) \((?P<status>.*)\)'
     for a_tag in a_tags:
@@ -92,10 +93,10 @@ def download(session):
     downloads_dir = BASE_DIR / 'downloads'
     downloads_dir.mkdir(exist_ok=True)
     archive_path = downloads_dir / filename
-    response = session.get(archive_url)
+    response = get_response(session, archive_url)
     with open(archive_path, 'wb') as file:
         file.write(response.content)
-    logging.info(f'Архив был загружен и сохранён: {archive_path}')
+    logger.info(f'Архив был загружен и сохранён: {archive_path}')
 
 
 def pep(session):
@@ -104,51 +105,73 @@ def pep(session):
         return
     soup = BeautifulSoup(response.text, features='lxml')
     statuses = Counter()
-    for id in PEP_ID:
-        table = soup.find('section', id=id)
-        wrapper = table.find('table', class_='pep-zero-table')
-        if wrapper is None:
+    mismatches = []
+    section = find_tag(soup, 'section', attrs={'id': 'numerical-index'})
+    a_href = find_tag(section, 'a', attrs={'class': 'reference internal'})
+    link = a_href['href']
+    pep_list_link = urljoin(PEP_DOC_URL, link)
+    response = get_response(session, pep_list_link)
+    link_soup = BeautifulSoup(response.text, features='lxml')
+    section = find_tag(link_soup, 'section', attrs={'id': 'numerical-index'})
+    table = find_tag(section, 'table', attrs={'class': 'pep-zero-table'})
+    tbody = find_tag(table, 'tbody')
+    rows = tbody.find_all('tr')
+    for row in tqdm(rows[1:]):
+        pep = row.find_all('td')
+        pep_status = pep[0]
+        preview_status = pep_status.text[1:]
+        link = find_tag(row, 'a')
+        pep_url = urljoin(PEP_DOC_URL, link['href'])
+        response = get_response(session, pep_url)
+        if response is None:
+            logger.warning('Не получилось получить данные с сервера')
             continue
-        rows = wrapper.find_all('tr')
-        for row in rows[1:]:
-            pep = row.find_all('td')
-            pep_status = pep[0]
-            preview_status = pep_status.text[1:]
-            link = row.find('a')
-            pep_url = urljoin(PEP_DOC_URL, link['href'])
-            response = get_response(session, pep_url)
-            if response is None:
-                logging.warning('Не получилось получить данные с сервера')
-                continue
-            pep_soup = BeautifulSoup(response.text, 'lxml')
-            section = pep_soup.find('section', id='pep-content')
-            dl = section.find('dl')
-            abbr = dl.find('abbr').string
-            if abbr not in EXPECTED_STATUS[preview_status]:
-                logging.warning('Несовпадающие статусы:\n'
-                                '%s\n'
-                                'Статус в карточке: %s\n'
-                                'Ожидаемые статусы: %s\n',
-                                pep_url,
-                                abbr,
-                                EXPECTED_STATUS[preview_status])
-            statuses[abbr] += 1
-    RESULTS_DIR = Path('results')
-    RESULTS_DIR.mkdir(exist_ok=True)
-    with open(
-        'results/status_summary.csv',
-        'w',
-        encoding='utf-8',
-        newline=''
-    ) as file:
-        writer = csv.writer(file)
+        pep_soup = BeautifulSoup(response.text, 'lxml')
+        section = find_tag(pep_soup, 'section', attrs={'id': 'pep-content'})
+        dl = find_tag(section, 'dl')
+        status = dl.find(string='Status')
+        status_value = status.parent.find_next_sibling('dd').text.strip()
+        if preview_status not in EXPECTED_STATUS:
+            logger.warning(
+                'Неизвестный статус в общей таблице: %s. PEP: %s',
+                preview_status,
+                pep_url
+            )
+            continue
+        if status_value not in EXPECTED_STATUS[preview_status]:
+            mismatches.append(
+                (
+                    pep_url,
+                    status_value,
+                    EXPECTED_STATUS[preview_status],
+                )
+            )
+        statuses[status_value] += 1
+    if mismatches:
+        message = ['Несовпадающие статусы:']
 
-        writer.writerow(['Статус', 'Количество'])
+        for pep_url, status, expected_statuses in mismatches:
+            message.extend([
+                '',
+                pep_url,
+                '',
+                f'Статус в карточке: {status}',
+                '',
+                f'Ожидаемые статусы: {expected_statuses}',
+            ])
 
-        for status, count in sorted(statuses.items()):
-            writer.writerow([status, count])
+        logger.warning('\n'.join(message))
+    results = [
+        ('Статус', 'Количество'),
+    ]
 
-        writer.writerow(['Total', sum(statuses.values())])
+    results.extend(statuses.items())
+
+    results.append(
+        ('Total', sum(statuses.values()))
+    )
+
+    return results
 
 
 MODE_TO_FUNCTION = {
@@ -161,11 +184,11 @@ MODE_TO_FUNCTION = {
 
 def main():
     configure_logging()
-    logging.info('Парсер запущен!')
+    logger.info('Парсер запущен!')
 
     arg_parser = configure_argument_parser(MODE_TO_FUNCTION.keys())
     args = arg_parser.parse_args()
-    logging.info(f'Аргументы командной строки: {args}')
+    logger.info(f'Аргументы командной строки: {args}')
 
     session = requests_cache.CachedSession()
     if args.clear_cache:
@@ -176,7 +199,7 @@ def main():
 
     if results is not None:
         control_output(results, args)
-    logging.info('Парсер завершил работу.')
+    logger.info('Парсер завершил работу.')
 
 
 if __name__ == '__main__':
